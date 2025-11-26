@@ -6,8 +6,6 @@ Was macht dieses Programm?
 - Berechnet wie viele Ladestationen (Plugin oder Swap) wir brauchen
 - Findet die günstigste Kombination
 - Nutzt Gurobi zur Optimierung
-
-Für Anfänger: Alles Schritt für Schritt erklärt!
 """
 
 import gurobipy as gp
