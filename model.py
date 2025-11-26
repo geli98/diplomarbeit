@@ -1,12 +1,3 @@
-"""
-GANZ EINFACHES Flugzeug-Lade-Modell für ANFÄNGER
-=================================================
-
-Was macht dieses Programm?
-- Berechnet wie viele Ladestationen (Plugin oder Swap) wir brauchen
-- Findet die günstigste Kombination
-- Nutzt Gurobi zur Optimierung
-"""
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -49,7 +40,7 @@ swapbat_lebenszyklen = 2000
 swapbat_abschreibungskosten = swapbat_kosten/swapbat_lebenszyklen
 
 # Ladeeffizienz
-ladeeffizienz = 0.93  # 93% Effizienz = 7% Verluste
+ladeeffizienz = 0.93  # 93% Effizienz
 
 strompreis_kwh = 0.30  # €/kWh
 netz_max_kw = 2000 #kW
@@ -62,7 +53,7 @@ globalstrahlung = 1100 # kWh/m²/Jahr
 pv_abschreibung = 25 # [Jahren] Lebensdauer der PV-Anlage
 
 #Sonnenstrahlung
-globalstrahlung_winter = 40  # kWh/m²/Monat (Dezember - Worst Case)
+globalstrahlung_winter = 40  # kWh/m²/Monat (vllt. Dezember als Worst Case)
 globalstrahlung_sommer = 200  # kWh/m²/Monat (Juli - Best Case)
 
 # opex: energiekosten
@@ -84,10 +75,9 @@ plugin_kapazitaet = 60 / plugin_zeit  # 60 min / 45 min = 1.33 Flugzeuge/h
 swap_kapazitaet = 60 / swap_zeit      # 60 min / 8 min = 7.5 Flugzeuge/h
 
 
-# 2: MODELL ERSTELLEN 
+# 2: Modell
 
 print(f"Flugplan: {flugplan}")
-print()
 
 # Gurobi-Modell erstellen
 model = gp.Model("Einfach")
@@ -96,7 +86,7 @@ model = gp.Model("Einfach")
 model.setParam('OutputFlag', 0) 
 
 
-# 3: VARIABLEN 
+# 3: Variablen
 
 # Variable 1: Wie viele Plugin-Stationen brauchen wir?
 anzahl_plugin = model.addVar(
@@ -109,7 +99,7 @@ anzahl_plugin = model.addVar(
 anzahl_swap = model.addVar(vtype=GRB.INTEGER,lb=0,name="Swap")
 anzahl_swapbat = model.addVar(vtype=GRB.INTEGER,lb=0,name="Batterie Swap")
 
-#Strom vom Netz pro Stunde (falls PV+ESS nicht reicht)
+# Strom vom Netz pro Stunde (falls PV+ESS nicht reicht)
 stromnetz = {}
 for t in range(anzahl_stunden):
     # wird für jede Std eigene Variable erzeugt
@@ -120,8 +110,7 @@ for t in range(anzahl_stunden):
         )
 
 
-
-#  -----HILFSFUNKTIONEN-----
+# Hilfsfunktionen
 # Zusatzformeln für die Zielfunktion
 
 plugin_pro_stunde = {}
@@ -147,11 +136,11 @@ energie_zu_laden = bat_kapazit * delta_soc #kWh
 # Energie mit Verlusten
 energie_benoetigt = energie_zu_laden / ladeeffizienz  #--- oder einzeln für plugin/swap?
 
-# PV-Produktion (SOMMER - Best Case)
+# PV-Produktion (Sommerzeit)
 pv_monat_pro_m2 = globalstrahlung_sommer * pv_wirkungsgrad  # kWh/m²/Monat
 pv_tag_pro_m2 = pv_monat_pro_m2 / 31  # kWh/m²/Tag (31 Tage im Juli)
 
-# Tagesprofil: Prozent der Tagesproduktion pro Stunde (6h: 5-11 Uhr)
+# Tagesprofil (oder gesamt am Tag)
 sonne_profil = [0.02, 0.05, 0.08, 0.12, 0.15, 0.18]
 
 # Belegung Batterie
@@ -181,16 +170,16 @@ opex = opex_energie + opex_wartung #+ opex_personal
 
 
 
-#  4: ZIELFUNKTION 
-# Was wollen wir minimieren? → Die Kosten!
+#  4: Zielfunktion
+
 zielfkt = capex + opex
 
 model.setObjective(zielfkt, GRB.MINIMIZE)
 
 
-# 5: NEBENBEDINGUNGEN 
-# Was muss erfüllt sein?
-#NB 1 - Bedarf decken + Kapazitäten beachten
+# 5: Nebenbedingungen
+
+#NB 1 - Bedarf decken + Kap. beachten
 
 for t in range(anzahl_stunden):
     # Alle Flugzeuge müssen geladen werden
@@ -229,12 +218,13 @@ for t in range(anzahl_stunden):
     )
 
 #NB 3 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom))
+
 for t in range(anzahl_stunden):
     # PV-Produktion dieser Stunde
     pv_prod_kwh = pv_flaeche * pv_tag_pro_m2 * sonne_profil[t]
 
-    # Bedarf dieser Stunde (vereinfacht: Anzahl Flugzeuge × Energie pro Flugzeug)
-    # Pro Flugzeug: energie_benoetigt kWh
+    # Bedarf dieser Stunde (vereinfacht: Anzahl Flugzeuge * Energie pro Flugzeug)
+    # pro Flugzeug: energie_benoetigt kWh
     bedarf_kwh = flugplan[t] * energie_benoetigt
 
     # Energie-Bilanz: PV + Netzstrom >= Bedarf
@@ -247,11 +237,11 @@ for t in range(anzahl_stunden):
 #NB 5
 
 
-# 6: OPTIMIEREN
+# 6: Optimieren
 
 model.optimize()
 
-# 7: ERGEBNIS
+# 7: Ergebnis
 
 if model.status == GRB.OPTIMAL:
     
@@ -262,7 +252,7 @@ if model.status == GRB.OPTIMAL:
     swap_anzahl = int(anzahl_swap.X)
     batterien_anzahl = int(anzahl_swapbat.X)
 
-    print(f"\nOptimale Lösung:")
+    print(f"\nLösung:")
     print(f"  Plugin-Stationen: {plugin_anzahl}")
     print(f"  Swap-Stationen:   {swap_anzahl}")
     print(f"  Swap-Batterien:   {batterien_anzahl}")
@@ -288,10 +278,10 @@ if model.status == GRB.OPTIMAL:
         print(f"\n--- Keine Swap-Batterien benötigt ---")
 
 else:
-    print("FEHLER: Keine Lösung gefunden!")
+    print("Keine Lösung gefunden!")
 
 
-# ========== ERWEITERUNGEN FÜR SPÄTER ==========
+# hinzufügen:
 """
 Modell erweitern mit:
  
