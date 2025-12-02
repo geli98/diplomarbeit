@@ -6,14 +6,46 @@ import math
 
 # 1: DATEN FESTLEGEN
 
-# Wie viele Flugzeuge müssen pro Stunde geladen werden?
-flugplan = [2, 6, 5, 8, 10, 8]  # 6 Stunden: z.B. 5-11 Uhr
-anzahl_stunden = len(flugplan)
+### Slots
+slot_dauer = 5  # Jeder Slot ist 5 Minuten lang
+anzahl_slots = 120  # 10 Stunden = 600 min / 5 min = 120 Slots
 
-###### ALLE ANGABEN
+
+slot_startzeit = {}
+for t in range(anzahl_slots):
+    slot_startzeit[t] = t * slot_dauer # bsp. slot_startzeit[2] = 2*5 = 10 (bspw. 06:10)
+
+# Wie viele Flugzeuge müssen pro Stunde geladen werden?
+# Als Bsp. 10 Stunden
+flugplan = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,  # Stunde 1 (6:00-7:00): 5 Flugzeuge
+            1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0,  # Stunde 2 (7:00-8:00): 3 Flugzeuge
+            1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,  # Stunde 3 (8:00-9:00): 2 Flugzeuge
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # Stunde 4 (9:00-10:00): 0 Flugzeuge
+            1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0,  # Stunde 5 (10:00-11:00): 4 Flugzeuge
+            1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0,  # Stunde 6 (11:00-12:00): 3 Flugzeuge
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # Stunde 7 (12:00-13:00): 0 Flugzeuge
+            1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # Stunde 8 (13:00-14:00): 2 Flugzeuge
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # Stunde 9 (14:00-15:00): 0 Flugzeuge
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Stunde 10 (15:00-16:00): 0 Flugzeuge
+
+# Jedes Flugzeug wird einzeln mit Ankunftsslot betrachtet und es wird für jedes Flugzeug id vergeben
+flugzeuge = []
+flugzeug_id = 0
+
+# Gehe durch alle Slots im Flugplan
+for slot in range(len(flugplan)):
+    anzahl_in_slot = flugplan[slot]  # Wie viele Flugzeuge kommen in diesem Slot
+
+    for i in range(anzahl_in_slot):  # Für jedes Flugzeug in diesem Slot
+        flugzeuge.append({"id": flugzeug_id, "ankunft": slot})
+        flugzeug_id = flugzeug_id + 1
+
+anzahl_flugzeuge = len(flugzeuge)
+
+###### Alle angaben
 # Plug-in
-plugin_kosten = 50000  # € pro Plugin-Station
-plugin_abschreibung = 10 # [Jahre]
+plugin_kosten = 50000      # € pro Plugin-Station
+plugin_abschreibung = 10   # [Jahre]
 plugin_kosten_jahr = plugin_kosten/plugin_abschreibung
 #plugin_wirkungsgrad = 0.95
 
@@ -22,12 +54,12 @@ plugin_spannung_max = 800 #V
 plugin_spannung_min = 600 #V
 plugin_strom_max = 125 #A
 plugin_strom_min = 10 #A
-plugin_cc_anteil = 0.80 # 80% CC, 20% CV ---- eig. wird die CV verlängert?
+plugin_cc_anteil = 0.80 # 80% CC, 20% CV ?
 
 #Swap-Angaben
-swap_kosten = 50000   # € pro Swap-Station
+swap_kosten = 50000    # € pro Swap-Station
 swapbat_kosten = 15000
-swap_wechsel = 10 #min ---- später genauer
+swap_wechsel = 10      #min ---- später genauer
 #swap_wirkungsgrad = 0.95
 
 #Batterien
@@ -62,73 +94,98 @@ globalstrahlung_sommer = 200  # kWh/m²/Monat (Juli - Best Case)
 #von der Zeitvorgängen abhängig
 
 # Ladezeiten - Annahmen: !! später anhand Ladeverfahren
-plugin_zeit = 75  # Minuten
-swap_zeit = 8     # Minuten
-swaplade_zeit = 75
+plugin_ladezeit = 75  # min
+swap_zeit = 8     # min
+swap_ladezeit = 75
 
 # Flugzeug-Parameter
-fzg_reichweite = 463 # km
-fzg_geschw = 489 #km/h
+fzg_reichweite = 463    # km
+fzg_geschw = 489       # km/h
+pax = 44
+flugzeit = fzg_reichweite/fzg_geschw * 60   # min
+flugzeit_gesamt = flugzeit * 2              # hin und zurück
 
-# Wie viele Flugzeuge kann eine Station pro Stunde bedienen?
-plugin_kapazitaet = 60 / plugin_zeit  # 60 min / 45 min = 1.33 Flugzeuge/h
-swap_kapazitaet = 60 / swap_zeit      # 60 min / 8 min = 7.5 Flugzeuge/h
+bat_blockzeit = (swap_ladezeit * 2) + flugzeit + swap_zeit   # min
+
+# Turnaround
+
+turnaround_swap = 25  # min (Annahme für Turnaround mit battery swap) - später kann aufgeschlüsselt werden
+batterie_leihgebuehr = 300  # EUR pro Swap
+
+# Delay-Kosten
+
+delay_kosten = 50    # EUR pro Minute Wartezeit
+
+# Opportunitätskosten (Kosten, die nicht verdient werden bspw. durch Delay - entgangener Gewinn)
+
+opportunitaet_kosten = 60   # EUR/min
+#opportunitaet_plugin = plugin_ladezeit - turnaround_swap ---
+
+# Begrenzungen in Kapazität
+max_plugin_stationen = 10
+max_swap_stationen = 10    
+max_batterien = 20
 
 
-# 2: Modell
 
-print(f"Flugplan: {flugplan}")
+# 2: Modell erstellen
 
 # Gurobi-Modell erstellen
-model = gp.Model("Einfach")
+model = gp.Model("Kostenoptimierung")
 
 # WICHTIG für die Ausgabe: 0-nur Endergebnis wird gezeigt; 1 - kann man sehen wie Gurobi optimiert
 model.setParam('OutputFlag', 0) 
 
 
-# 3: Variablen
+
+
+# 3: Entscheidungsvariablen
 
 # Variable 1: Wie viele Plugin-Stationen brauchen wir?
 anzahl_plugin = model.addVar(
     vtype=GRB.INTEGER,  # Muss eine Ganzzahl sein
     lb=0,               # Minimum: 0 Stationen
-    name="Plugin"
-)
+    name="Anzahl_Plugin")
 
 # Variable 2: Wie viele Swap-Stationen und Batterien für Batteriwechsel?
-anzahl_swap = model.addVar(vtype=GRB.INTEGER,lb=0,name="Swap")
-anzahl_swapbat = model.addVar(vtype=GRB.INTEGER,lb=0,name="Batterie Swap")
+anzahl_swap = model.addVar(vtype=GRB.INTEGER,lb=0,name="Anzahl_Swap")
+anzahl_bat = model.addVar(vtype=GRB.INTEGER,lb=0,name="Anzahl_Batterien")
 
 # Strom vom Netz pro Stunde (falls PV+ESS nicht reicht)
 stromnetz = {}
-for t in range(anzahl_stunden):
-    # wird für jede Std eigene Variable erzeugt
-    stromnetz[t] = model.addVar(
-        vtype=GRB.CONTINUOUS,
-        lb=0,
-        name=f"Netz_Strom_kWh_{t}"
-        )
+for t in range(anzahl_slots):
+    # wird für jedes Slot eigene Variable erzeugt
+    stromnetz[t] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Netz_Strom_{t}")
 
+# Pro Slot
 
-# Hilfsfunktionen
-# Zusatzformeln für die Zielfunktion
+plugin_start = {} # plugin_start[t] = Anzahl Plug-in
+swap_start = {}
 
-plugin_pro_stunde = {}
-swap_pro_stunde = {}
+for t in range(anzahl_slots):
+    # wie viel ladesäulen werden jede stunden benutzt
+    plugin_start[t] = model.addVar(vtype=GRB.INTEGER, lb=0, name=f"Plugin_Start_{t}")
+    swap_start[t] = model.addVar(vtype=GRB.INTEGER, lb=0, name=f"Swap_Start_{t}")
 
-for t in range(anzahl_stunden):
-    #schaut wie viel ladesäulen werden jede stunden benutzt
-    plugin_pro_stunde[t] = model.addVar(
-    vtype=GRB.INTEGER,
-    lb=0,
-    name=f"Plugin_Stunde_{t}"
-    )
-    swap_pro_stunde[t] = model.addVar(
-    vtype=GRB.INTEGER,
-    lb=0,
-    name=f"Swap_Stunde_{t}")
+# Variablen für einzelne Flugzeuge
 
-#cc-cv Ladung
+ist_plugin = {}  # ist_plugin[f] = 1 wenn Flugzeug f Plugin nutzt, sonst 0
+ist_swap = {}    # ist_swap[f] = 1 wenn Flugzeug f Swap nutzt
+start_slot = {}  # start_slot[f] = In welchem Slot startet die Ladung?
+wartezeit = {}   # wartezeit[f] = Wartezeit in Slots (nicht Min)
+
+for f in range(anzahl_flugzeuge):
+    ist_plugin[f] = model.addVar(vtype=GRB.BINARY, name=f"Plugin_Flugzeug_{f}")
+    ist_swap[f] = model.addVar(vtype=GRB.BINARY, name=f"Plugin_Flugzeug_{f}")
+
+    #Anfang von Ladung (Slot) soll später (>=) als der Ankunft sein
+    ankunft = flugzeuge[f]["ankunft"]
+    start_slot[f] = model.addVar(vtype=GRB.INTEGER, lb=ankunft, ub=anzahl_slots-1, name=f"Start_Slot_{f}")
+
+    # Start-Slot - Ankunft-Slot
+    wartezeit[f] = model.addVar(vtype=GRB.INTEGER, lb=0, name=f"Wartezeit_{f}")
+    
+# CC-CV Ladung (für später)
 delta_soc = soc_ende - soc_start
 energie_zu_laden = bat_kapazit * delta_soc #kWh
 
@@ -143,9 +200,6 @@ pv_tag_pro_m2 = pv_monat_pro_m2 / 31  # kWh/m²/Tag (31 Tage im Juli)
 # Tagesprofil (oder gesamt am Tag)
 sonne_profil = [0.02, 0.05, 0.08, 0.12, 0.15, 0.18]
 
-# Belegung Batterie
-
-bat_belegzeit = (swaplade_zeit*2) + fzg_reichweite/fzg_geschw*60 # [min]
 
 # capex
 capex_plugin = plugin_kosten * anzahl_plugin
@@ -280,30 +334,3 @@ if model.status == GRB.OPTIMAL:
 else:
     print("Keine Lösung gefunden!")
 
-
-# hinzufügen:
-"""
-Modell erweitern mit:
- 
-1. BATTERIEN hinzufügen: +
-   - Neue Variable: anzahl_batterien
-   - Neue Kosten: batterie_kosten
-   - Neue Constraint: Batterien müssen verfügbar sein
-
-2. PHOTOVOLTAIK hinzufügen: +
-   - Variable: pv_flaeche
-   - Energie-Bilanz: PV + Netz = Bedarf
-
-3. ZEITABHÄNGIGE VARIABLEN: +
-   - plugin_pro_stunde[t] statt nur anzahl_plugin
-
-4. BETRIEBSKOSTEN hinzufügen:
-   - Stromkosten
-   - Personalkosten
-   - Wartungskosten
-
-5. CC-CV LADUNG:
-   - Realistische Ladezeiten berechnen
-   - Leistung über Zeit modellieren
-
-"""
