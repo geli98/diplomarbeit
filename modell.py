@@ -127,6 +127,11 @@ max_plugin_stationen = 10
 max_swap_stationen = 10    
 max_batterien = 20
 
+# PV - Energiespeicher
+speicher_kapazitaet = 5000  # kWh (feste Groesse)
+speicher_effizienz = 0.90   # 90% Effizienz beim Laden/Entladen
+speicher_kosten_kwh = 150   # EUR pro kWh Kapazitaet
+
 
 
 # 2: Modell erstellen
@@ -328,45 +333,7 @@ for t in range(anzahl_slots):
     model.addConstr(bat_blockiert <= anzahl_bat, name=f"Batterie_Verfuegbar_{t}")
 
 
-
-#NB 4 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom))
-""" stündlich/slot/tag
-for t in range(anzahl_slots):
-    # PV-Produktion dieser Stunde
-    pv_prod_kwh = pv_flaeche * pv_tag_pro_m2 * sonne_profil[t]
-
-    # Bedarf dieser Stunde (vereinfacht: Anzahl Flugzeuge * Energie pro Flugzeug)
-    # pro Flugzeug: energie_benoetigt kWh
-    bedarf_kwh = flugplan[t] * energie_benoetigt
-
-    # Energie-Bilanz: PV + Netzstrom >= Bedarf
-    model.addConstr(pv_prod_kwh + stromnetz[t] >= bedarf_kwh,name=f"Energie_{t}")
-"""
-
-#NB 5 - Begrenzung der Stationen und Batterien
-model.addConstr(anzahl_plugin <= max_plugin_stationen, name="Max_Plugin")
-model.addConstr(anzahl_swap <= max_swap_stationen, name="Max_Swap")
-model.addConstr(anzahl_bat <= max_batterien, name="Max_Batterien")
-
-#NB 6 -- Nebenbedingungen fuer einzelne Flugzeuge --
-for f in range(anzahl_flugzeuge):
-    ankunft = flugzeuge[f]["ankunft"]
-
-    #NB 6a: Jedes Flugzeug muss entweder Plugin ODER Swap nutzen (nicht beides, nicht keins)
-    model.addConstr(ist_plugin[f] + ist_swap[f] == 1, name=f"Entweder_Plugin_oder_Swap_{f}")
-
-    #NB 6b: Wartezeit = Start-Slot - Ankunfts-Slot
-    model.addConstr(wartezeit[f] == start_slot[f] - ankunft, name=f"Wartezeit_Berechnung_{f}")
-
-    # NB 7c: Bodenzeit in Stunden (aufgerundet für Abstellkosten - jede angefangene Stunde)
-    # Bodenzeit = Wartezeit + Ladezeit (Plugin: 75 min, Swap: 25 min Turnaround)
-    #
-    # Aufrunden: stunden >= bodenzeit/60 und stunden <= bodenzeit/60 + 0.99
-    bodenzeit_min = wartezeit[f] * slot_dauer + ist_plugin[f] * plugin_ladezeit + ist_swap[f] * turnaround_swap
-    model.addConstr(bodenzeit_stunden[f] >= bodenzeit_min / 60, name=f"Bodenzeit_Min_{f}")
-    model.addConstr(bodenzeit_stunden[f] <= bodenzeit_min / 60 + 0.99, name=f"Bodenzeit_Max_{f}")
-
-# NB 8: Verbindung zwischen Flugzeug-Variablen und Slot-Variablen
+# NB 4: Verbindung zwischen Flugzeug-Variablen und Slot-Variablen
 # plugin_start[t] = Anzahl Flugzeuge die in Slot t mit Plugin starten
 # Das muss gleich sein wie die Summe aller ist_plugin[f] wo start_slot[f] == t
 
@@ -392,6 +359,87 @@ for t in range(anzahl_slots):
     model.addConstr(
         swap_start[t] == gp.quicksum(ist_swap[f] * startet_in_slot[f, t] for f in range(anzahl_flugzeuge)), name=f"Swap_Start_Verbindung_{t}")
 
+
+
+#NB 5 - Begrenzung der Stationen und Batterien
+model.addConstr(anzahl_plugin <= max_plugin_stationen, name="Max_Plugin")
+model.addConstr(anzahl_swap <= max_swap_stationen, name="Max_Swap")
+model.addConstr(anzahl_bat <= max_batterien, name="Max_Batterien")
+
+#NB 6 -- Nebenbedingungen fuer einzelne Flugzeuge --
+for f in range(anzahl_flugzeuge):
+    ankunft = flugzeuge[f]["ankunft"]
+
+    #NB 6a: Jedes Flugzeug muss entweder Plugin ODER Swap nutzen (nicht beides, nicht keins)
+    model.addConstr(ist_plugin[f] + ist_swap[f] == 1, name=f"Entweder_Plugin_oder_Swap_{f}")
+
+    #NB 6b: Wartezeit = Start-Slot - Ankunfts-Slot
+    model.addConstr(wartezeit[f] == start_slot[f] - ankunft, name=f"Wartezeit_Berechnung_{f}")
+
+    # NB 6c: Bodenzeit in Stunden (aufgerundet für Abstellkosten - jede angefangene Stunde)
+    # Bodenzeit = Wartezeit + Ladezeit (Plugin: 75 min, Swap: 25 min Turnaround)
+    #
+    # Aufrunden: stunden >= bodenzeit/60 und stunden <= bodenzeit/60 + 0.99
+    bodenzeit_min = wartezeit[f] * slot_dauer + ist_plugin[f] * plugin_ladezeit + ist_swap[f] * turnaround_swap
+    model.addConstr(bodenzeit_stunden[f] >= bodenzeit_min / 60, name=f"Bodenzeit_Min_{f}")
+    model.addConstr(bodenzeit_stunden[f] <= bodenzeit_min / 60 + 0.99, name=f"Bodenzeit_Max_{f}")
+
+
+#NB 5 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom + Speicher))
+
+# PV-Strahlung (Sommer) - best case
+strahlung_stunde = [121, 173, 210, 262, 297, 319, 315, 296, 266, 216]  # J/cm²
+
+""" stündlich/slot/tag
+for t in range(anzahl_slots):
+    # PV-Produktion dieser Stunde
+    pv_prod_kwh = pv_flaeche * pv_tag_pro_m2 * sonne_profil[t]
+
+    # Bedarf dieser Stunde (vereinfacht: Anzahl Flugzeuge * Energie pro Flugzeug)
+    # pro Flugzeug: energie_benoetigt kWh
+    bedarf_kwh = flugplan[t] * energie_benoetigt
+
+    # Energie-Bilanz: PV + Netzstrom >= Bedarf
+    model.addConstr(pv_prod_kwh + stromnetz[t] >= bedarf_kwh,name=f"Energie_{t}")
+"""
+
+speicher_stand = {-1: 0} # stand der speicher am ende der Stunde h, # Speicher fängt bei 0 an
+speicher_ein = {} # strom, die hergestellt wird und gespeichert
+speicher_aus = {} # 
+
+umrechnung_pv = 1/360  #J/m² --> kWh/m²
+
+# Netzstrom pro Std
+stromnetz = {}
+for h in range(10): 
+    stromnetz[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Netz_Stunde_{h}")
+
+
+for h in range(10):   #range - Betriebsstunden
+    speicher_stand[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=speicher_kapazitaet, name=f"Speicher_Stand_{h}")
+    speicher_ein[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Speicher_Ein_{h}")
+    speicher_aus[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Speicher_Aus_{h}")
+
+for h in range(10):
+    # PV pro Std [kWh]
+    pv_std = pv_flaeche * strahlung_stunde[h] * umrechnung_pv * pv_wirkungsgrad
+
+    # jede stunde 12 slots
+    slot_start = h * 12 
+    slot_ende = (h + 1) * 12
+
+    # Bedarf = Summe aller Flugzeuge die in dieser Stunde mit Laden STARTEN
+    bedarf_stunde = gp.quicksum(startet_in_slot[f, t] * energie_benoetigt for f in range(anzahl_flugzeuge)
+        for t in range(slot_start, slot_ende))
+
+    # Energiebilanz
+    model.addConstr(
+        pv_std + stromnetz[h] + speicher_aus[h] * speicher_effizienz >= stromnetz[h] + speicher_ein[h], name=f"Energie_Stunde_{h}")
+    
+    # Speicher-Stand pro std
+    model.addConstr(
+        speicher_stand[h] == speicher_stand[h-1] + speicher_ein[h] * speicher_effizienz - speicher_aus[h], name=f"Speicher_Update_{h}")
+
 # 6: Optimieren
 
 model.optimize()
@@ -410,15 +458,14 @@ if model.status == GRB.OPTIMAL:
     n_swap_total = sum(swap_start[t].X for t in range(anzahl_slots))
 
     print(f"\nLösung:")
-    """    print(f"  Plugin-Stationen: {plugin_anzahl}")
-    print(f"  Swap-Stationen:   {swap_anzahl}")
-    print(f"  Swap-Batterien:   {batterien_anzahl}")
-    """
+
     # Delay-Kosten berechnen
     total_wartezeit_slots = sum(wartezeit[f].X for f in range(anzahl_flugzeuge))
     total_wartezeit_min = total_wartezeit_slots * slot_dauer
     total_delay_kosten = total_wartezeit_min * delay_kosten
 
+    print(f"Plugin: {n_plugin} ; Swap: {n_swap} ; Batterien: {n_bat} ")
+    print(f"Ladevorgaenge: {n_plugin_total:.0f} Plugin, {n_swap_total:.0f} Swap")
     print(f"\nGesamtkosten (optimiert): €{model.ObjVal:,.2f}")
 
     print("\nDetails pro Flugzeug:")
