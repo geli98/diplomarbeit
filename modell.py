@@ -27,6 +27,7 @@ flugplan = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,  # Stunde 1 (6:00-7:00): 5 Flugz
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  #...
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Stunde 10 (15:00-16:00)
 
+#def flugzeuge_aus_flugplan(flugplan):
 # Jedes Flugzeug wird einzeln mit Ankunftsslot betrachtet und es wird für jedes Flugzeug id vergeben
 flugzeuge = []
 flugzeug_id = 0
@@ -156,11 +157,13 @@ anzahl_plugin = model.addVar(
 anzahl_swap = model.addVar(vtype=GRB.INTEGER,lb=0,name="Anzahl_Swap")
 anzahl_bat = model.addVar(vtype=GRB.INTEGER,lb=0,name="Anzahl_Batterien")
 
+""" alt: Strom pro Slot
 # Strom vom Netz pro Stunde (falls PV+ESS nicht reicht)
 stromnetz = {}
 for t in range(anzahl_slots):
     # wird für jedes Slot eigene Variable erzeugt
     stromnetz[t] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Netz_Strom_{t}")
+"""
 
 # Pro Slot
 
@@ -251,10 +254,6 @@ capex_pv = pv_flaeche * pv_kosten_pro_m2
 capex = capex_plugin + capex_swap + capex_swapbat + capex_pv
 
 # OPEX (Flughafen)
-# Energiekosten
-# summiert Stromwerte über alle Slots
-strom_pro_tag = gp.quicksum(stromnetz[t] for t in range(anzahl_slots))
-opex_energie = strom_pro_tag * strompreis_kwh #* 365 * planungsjahre
 
 # opex - Wartung: 10% der Anschaffung × Anzahl Stationen
 plugin_wartung = 0.10 * plugin_kosten * anzahl_plugin
@@ -262,10 +261,6 @@ swap_wartung = 0.10 * swap_kosten * anzahl_swap
 
 opex_wartung = plugin_wartung + swap_wartung
 
-opex = opex_energie + opex_wartung #+ opex_personal
-
-# Flughafen-Kosten gesamt
-kosten_flughafen = capex + opex
 
 # Kosten (Airlines)
 total_plugin = gp.quicksum(plugin_start[t] for t in range(anzahl_slots))
@@ -280,12 +275,6 @@ kosten_batterie = total_swap * batterie_leihgebuehr
 kosten_delay = gp.quicksum(wartezeit[f] * slot_dauer * delay_kosten for f in range(anzahl_flugzeuge))
 
 kosten_airline = kosten_abstellen + kosten_batterie + kosten_delay #+ kosten_opportunitaet
-
-# ---- ZIELFUNKTION GESAMT -----
-
-zielfkt = kosten_flughafen + kosten_airline
-
-model.setObjective(zielfkt, GRB.MINIMIZE)
 
 
 # 5: Nebenbedingungen
@@ -377,7 +366,7 @@ for f in range(anzahl_flugzeuge):
     model.addConstr(wartezeit[f] == start_slot[f] - ankunft, name=f"Wartezeit_Berechnung_{f}")
 
     # NB 6c: Bodenzeit in Stunden (aufgerundet für Abstellkosten - jede angefangene Stunde)
-    # Bodenzeit = Wartezeit + Ladezeit (Plugin: 75 min, Swap: 25 min Turnaround)
+    # Bodenzeit = Wartezeit + Ladezeit (bspw. Plugin: 75 min, Swap: 25 min Turnaround)
     #
     # Aufrunden: stunden >= bodenzeit/60 und stunden <= bodenzeit/60 + 0.99
     bodenzeit_min = wartezeit[f] * slot_dauer + ist_plugin[f] * plugin_ladezeit + ist_swap[f] * turnaround_swap
@@ -414,6 +403,20 @@ stromnetz = {}
 for h in range(10): 
     stromnetz[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Netz_Stunde_{h}")
 
+# summiert Stromwerte über alle Slots
+strom_pro_tag = gp.quicksum(stromnetz[h] for h in range(10))
+opex_energie = strom_pro_tag * strompreis_kwh #* 365 * planungsjahre
+
+# OPEX und Flughafen-Kosten
+opex = opex_energie + opex_wartung
+kosten_flughafen = capex + opex
+
+# ---- ZIELFUNKTION GESAMT -----
+
+zielfkt = kosten_flughafen + kosten_airline
+
+model.setObjective(zielfkt, GRB.MINIMIZE)
+
 
 for h in range(10):   #range - Betriebsstunden
     speicher_stand[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=speicher_kapazitaet, name=f"Speicher_Stand_{h}")
@@ -434,7 +437,7 @@ for h in range(10):
 
     # Energiebilanz
     model.addConstr(
-        pv_std + stromnetz[h] + speicher_aus[h] * speicher_effizienz >= stromnetz[h] + speicher_ein[h], name=f"Energie_Stunde_{h}")
+        pv_std + stromnetz[h] + speicher_aus[h] * speicher_effizienz >= bedarf_stunde + speicher_ein[h], name=f"Energie_Stunde_{h}")
     
     # Speicher-Stand pro std
     model.addConstr(
@@ -464,9 +467,39 @@ if model.status == GRB.OPTIMAL:
     total_wartezeit_min = total_wartezeit_slots * slot_dauer
     total_delay_kosten = total_wartezeit_min * delay_kosten
 
+    # Speicher-Nutzung berechnen
+    speicher_ein_total = sum(speicher_ein[h].X for h in range(10))
+    speicher_aus_total = sum(speicher_aus[h].X for h in range(10))
+    speicher_end = speicher_stand[9].X
+
+    print("Ergebnis")
     print(f"Plugin: {n_plugin} ; Swap: {n_swap} ; Batterien: {n_bat} ")
+    print(f"Speicher: {speicher_kapazitaet:.0f} kWh ; Start: 0 kWh ; Ende: {speicher_end:.0f} kWh")
     print(f"Ladevorgaenge: {n_plugin_total:.0f} Plugin, {n_swap_total:.0f} Swap")
+    print(f"Netzstrom: {strom_pro_tag.getValue():.1f} kWh ; Speicher Ein: {speicher_ein_total:.1f} kWh ; Speicher Aus: {speicher_aus_total:.1f} kWh")
+    print(f"Wartezeit: {total_wartezeit_min:.0f} min -> Delay-Kosten: {total_delay_kosten:.0f} EUR")
+
     print(f"\nGesamtkosten (optimiert): €{model.ObjVal:,.2f}")
+
+        # Energiebilanz pro Stunde (mit Speicher)
+    print("\nEnergiebilanz pro Stunde:")
+    print(f"  {'Stunde':<12} {'PV':>8} {'Bedarf':>8} {'Netz':>8} {'Sp.Ein':>8} {'Sp.Aus':>8} {'Sp.Stand':>8}")
+    for h in range(10):
+        pv_h = pv_flaeche * strahlung_stunde[h] * umrechnung_pv * pv_wirkungsgrad
+        # Bedarf berechnen: Flugzeuge die in dieser Stunde mit Laden STARTEN
+        slot_start_h = h * 12
+        slot_ende_h = (h + 1) * 12
+        bedarf_h = sum(
+            startet_in_slot[f, t].X * energie_benoetigt
+            for f in range(anzahl_flugzeuge)
+            for t in range(slot_start_h, slot_ende_h)
+        )
+        netz_h = stromnetz[h].X
+        ein_h = speicher_ein[h].X
+        aus_h = speicher_aus[h].X
+        stand_h = speicher_stand[h].X
+        uhrzeit = f"{6+h}:00-{7+h}:00"
+        print(f"  {uhrzeit:<12} {pv_h:>8.0f} {bedarf_h:>8.0f} {netz_h:>8.0f} {ein_h:>8.0f} {aus_h:>8.0f} {stand_h:>8.0f}")
 
     print("\nDetails pro Flugzeug:")
     for f in range(anzahl_flugzeuge):
