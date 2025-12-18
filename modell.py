@@ -7,7 +7,8 @@ import math
 
 ### Slots
 SLOT_DAUER = 5  # Jeder Slot ist 5 Minuten lang
-ANZAHL_SLOTS = 120  # 10 Stunden = 600 min / 5 min = 120 Slots
+ANZAHL_SLOTS = 192  # 16 Stunden = 960 min / 5 min = 192 Slots
+BETRIEBSSTUNDEN = 16
 
 # Plug-in
 PLUGIN_KOSTEN = 50000      # € pro Plugin-Station
@@ -18,7 +19,7 @@ PLUGIN_KOSTEN_JAHR = PLUGIN_KOSTEN/PLUGIN_ABSCHREIBUNG
 #Daten für Ladeverfahren CC-CV - Ladezeit
 PLUGIN_SPANNUNG_MAX = 800 #V
 PLUGIN_SPANNUNG_MIN = 600 #V
-PLUGIN_STROM_MAX = 125 #A
+PLUGIN_STROM_MAX = 1500 #A
 PLUGIN_STROM_MIN = 10 #A
 PLUGIN_CC_ANTEIL = 0.80 # 80% CC, 20% CV ?
 #Swap-Angaben
@@ -30,9 +31,11 @@ SWAP_WECHSEL = 10      #min ---- später genauer
 #Batterien
 BAT_KAPAZIT = 2900 #kWh
 BAT_SPANNUNG_MAX = 800 # V
-BAT_STROM_MAX = 125 #A
+BAT_STROM_MAX = 1500 #A
 SOC_START = 0.10
 SOC_ENDE = 0.95
+SOC_CC_ENDE = 0.80
+BAT_WIDERSTAND = 0.03
 SWAPBAT_LEBENSZYKLEN = 2000
 SWAPBAT_ABSCHREIBUNGSKOSTEN = SWAPBAT_KOSTEN/SWAPBAT_LEBENSZYKLEN
 
@@ -77,6 +80,7 @@ OPPORTUNITAET_KOSTEN = 60   # EUR/min
 max_plugin_stationen = 10
 max_swap_stationen = 10    
 max_batterien = 20
+MAX_WARTEZEIT_MIN = 30  # Max Wartezeit pro Flugzeug in Minuten
 
 # PV - Energiespeicher
 SPEICHER_KAPAZITAET = 5000  # kWh (feste Groesse)
@@ -100,7 +104,13 @@ flugplan = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,  # Stunde 1 (6:00-7:00): 5 Flugz
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  
             1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,  
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  #...
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Stunde 10 (15:00-16:00)
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0,  # 16:00-17:00: 3 Flugzeuge
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,  # 17:00-18:00: 5 Flugzeuge
+            1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0,  # 18:00-19:00: 4 Flugzeuge
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0,  # 19:00-20:00: 5 Flugzeuge
+            1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # 20:00-21:00: 2 Flugzeuge
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,]  # Stunde 16 (21:00-22:00)
 
 # Funktion: Erstellt Flugzeug-Liste aus dem Flugplan
 def flugzeuge_aus_flugplan(flugplan):
@@ -124,12 +134,83 @@ def flugzeuge_aus_flugplan(flugplan):
 flugzeuge = flugzeuge_aus_flugplan(flugplan)
 anzahl_flugzeuge = len(flugzeuge)
 
+def berechne_ladezeit_cc_cv(kapazitaet_kwh, spannung_v, strom_a, soc_start, soc_ende, soc_cc_ende, widerstand):
+    """
+    Quelle: Kar et al. "CC-CV Charging of Lithium-ion Battery for Electric Vehicle Applications"
+    CC-Phase: Konstanter Strom von soc_start bis soc_cc_ende (80%)
+    Formel: t_CC = C_Ah * delta_SOC / I_CC
 
-# Ladezeiten - Annahmen: !! später anhand Ladeverfahren
-plugin_ladezeit = 75  # min
-swap_zeit = 8     # min
-swap_ladezeit = 75
+    CV-Phase: Konstante Spannung von soc_cc_ende bis soc_ende
+        Formel (Kar): I(t) = I_0 * e^(-t/RC)
+        Umgestellt: t_CV = -RC * ln(I_cutoff / I_0)
 
+    Parameter:
+        kapazitaet_kwh: Batteriekapazität in kWh
+        spannung_v: Nennspannung in V
+        strom_a: Ladestrom in A (I_0)
+        soc_start: Start-SOC (z.B. 0.10)
+        soc_ende: Ziel-SOC (z.B. 0.95)
+        soc_cc_ende: SOC am Ende der CC-Phase (z.B. 0.80)
+        widerstand: Innenwiderstand in Ohm (R)
+    """
+        # Umrechnung kWh -> Ah
+    kapazitaet_ah = kapazitaet_kwh * 1000 / spannung_v
+
+    # Umrechnung Ah -> Farad (für RC-Zeitkonstante)
+    kapazitaet_farad = kapazitaet_ah * 3600 / spannung_v
+
+    # ===== CC-PHASE =====
+    # t_CC = C_Ah * delta_SOC / I_CC
+    if soc_start < soc_cc_ende:
+        delta_soc_cc = min(soc_cc_ende, soc_ende) - soc_start
+        t_cc_std = kapazitaet_ah * delta_soc_cc / strom_a
+    else:
+        t_cc_std = 0
+
+    # ===== CV-PHASE =====
+    # Formel: I(t) = I_0 * e^(-t/RC)
+    # Umgestellt: t_CV = -RC * ln(I_cutoff / I_0)
+    if soc_ende > soc_cc_ende:
+        # Cutoff-Strom (5% von I_0)
+        strom_cutoff = 0.05 * strom_a
+
+        # Zeitkonstante tau = R * C
+        tau = widerstand * kapazitaet_farad
+
+        # CV-Zeit bis Cutoff (100% SOC)
+        t_cv_voll_sec = -tau * math.log(strom_cutoff / strom_a)
+
+        # Anteilig für tatsächlichen SOC-Bereich (80% -> 95% statt 80% -> 100%)
+        anteil = (soc_ende - soc_cc_ende) / (1.0 - soc_cc_ende)
+        t_cv_std = (t_cv_voll_sec / 3600) * anteil
+    else:
+        t_cv_std = 0
+
+    # Gesamtzeit
+    t_gesamt_std = t_cc_std + t_cv_std
+
+    return {
+        'cc_min': t_cc_std * 60,
+        'cv_min': t_cv_std * 60,
+        'gesamt_min': t_gesamt_std * 60
+    }
+
+# Ladezeiten berechnen
+ladezeit_ergebnis = berechne_ladezeit_cc_cv(
+    kapazitaet_kwh=BAT_KAPAZIT,
+    spannung_v=PLUGIN_SPANNUNG_MAX,
+    strom_a=PLUGIN_STROM_MAX,
+    soc_start=SOC_START,
+    soc_ende=SOC_ENDE,
+    soc_cc_ende=SOC_CC_ENDE,
+    widerstand=BAT_WIDERSTAND
+)
+
+
+# Ladezeiten
+plugin_ladezeit = ladezeit_ergebnis['gesamt_min']  # min
+swap_ladezeit = ladezeit_ergebnis['gesamt_min']    # gleiche Batterie, gleiche Ladezeit
+swap_zeit = 10  # min (Wechselzeit)
 
 FLUGZEIT = FZG_REICHWEITE/FZG_GESCHW * 60   # min
 FLUGZEIT_GESAMT = FLUGZEIT * 2 + TURNAROUND_SWAP              # hin und zurück + turnaround am anderen Flughafen
@@ -245,7 +326,7 @@ energie_benoetigt = energie_zu_laden / LADEEFFIZIENZ  #--- oder einzeln für plu
 #pv_tag_pro_m2 = pv_monat_pro_m2 / 31  # kWh/m²/Tag (31 Tage im Juli)
 
 # PV-Strahlung (Sommer) - best case
-strahlung_stunde = [121, 173, 210, 262, 297, 319, 315, 296, 266, 216]  # J/cm²
+strahlung_stunde = [121, 173, 210, 262, 297, 319, 315, 296, 266, 216, 174, 99, 53, 8, 0, 0,]  # J/cm² 4-5: 17; 5-6: 63
 
 
 # CAPEX (Flughafen)
@@ -341,6 +422,7 @@ for f in range(anzahl_flugzeuge):
     # start_slot[f] = Summe(t * startet_in_slot[f,t])
     model.addConstr(start_slot[f] == gp.quicksum(t * startet_in_slot[f, t] for t in range(ANZAHL_SLOTS)), name=f"Start_Slot_Wert_{f}")
 # Jetzt verbinden wir plugin_start und swap_start mit den Flugzeug-Entscheidungen
+
 for t in range(ANZAHL_SLOTS):
     # plugin_start[t] = Anzahl Flugzeuge die in Slot t mit Plugin starten
     model.addConstr(
@@ -352,9 +434,11 @@ for t in range(ANZAHL_SLOTS):
 
 
 #NB 5 - Begrenzung der Stationen und Batterien
+"""
 model.addConstr(anzahl_plugin <= max_plugin_stationen, name="Max_Plugin")
 model.addConstr(anzahl_swap <= max_swap_stationen, name="Max_Swap")
 model.addConstr(anzahl_bat <= max_batterien, name="Max_Batterien")
+"""
 
 #NB 6 -- Nebenbedingungen fuer einzelne Flugzeuge --
 for f in range(anzahl_flugzeuge):
@@ -374,6 +458,9 @@ for f in range(anzahl_flugzeuge):
     model.addConstr(bodenzeit_stunden[f] >= bodenzeit_min / 60, name=f"Bodenzeit_Min_{f}")
     model.addConstr(bodenzeit_stunden[f] <= bodenzeit_min / 60 + 0.99, name=f"Bodenzeit_Max_{f}")
 
+    # NB 6d: Maximale Wartezeit pro Flugzeug
+    max_wartezeit_slots = MAX_WARTEZEIT_MIN // SLOT_DAUER  # 30 min / 5 min = 6 Slots
+    model.addConstr(wartezeit[f] <= max_wartezeit_slots, name=f"Max_Wartezeit_{f}")
 
 #NB 5 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom + Speicher))
 
@@ -398,11 +485,11 @@ umrechnung_pv = 1/360  #J/m² --> kWh/m²
 
 # Netzstrom pro Std
 stromnetz = {}
-for h in range(10): 
+for h in range(BETRIEBSSTUNDEN): 
     stromnetz[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Netz_Stunde_{h}")
 
 # summiert Stromwerte über alle Slots
-strom_pro_tag = gp.quicksum(stromnetz[h] for h in range(10))
+strom_pro_tag = gp.quicksum(stromnetz[h] for h in range(BETRIEBSSTUNDEN))
 opex_energie = strom_pro_tag * STROMPREIS_KWH #* 365 * planungsjahre
 
 # OPEX und Flughafen-Kosten
@@ -416,12 +503,12 @@ zielfkt = kosten_flughafen + kosten_airline
 model.setObjective(zielfkt, GRB.MINIMIZE)
 
 
-for h in range(10):   #range - Betriebsstunden
+for h in range(BETRIEBSSTUNDEN):  
     speicher_stand[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=SPEICHER_KAPAZITAET, name=f"Speicher_Stand_{h}")
     speicher_ein[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Speicher_Ein_{h}")
     speicher_aus[h] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, name=f"Speicher_Aus_{h}")
 
-for h in range(10):
+for h in range(BETRIEBSSTUNDEN):
     # PV pro Std [kWh]
     pv_std = PV_FLAECHE * strahlung_stunde[h] * umrechnung_pv * PV_WIRKUNGSGRAD
 
@@ -440,6 +527,9 @@ for h in range(10):
     # Speicher-Stand pro std
     model.addConstr(
         speicher_stand[h] == speicher_stand[h-1] + speicher_ein[h] * SPEICHER_EFFIZIENZ - speicher_aus[h], name=f"Speicher_Update_{h}")
+
+    # Speicher sofort entladen: Alles was im Speicher ist, muss raus
+    model.addConstr(speicher_aus[h] >= speicher_stand[h-1], name=f"Speicher_Sofort_Entladen_{h}")
 
 # 6: Optimieren
 
@@ -463,8 +553,8 @@ def ergebnis_ausgeben():
     total_delay_kosten = total_wartezeit_min * DELAY_KOSTEN
 
     # Speicher-Nutzung berechnen
-    speicher_ein_total = sum(speicher_ein[h].X for h in range(10))
-    speicher_aus_total = sum(speicher_aus[h].X for h in range(10))
+    speicher_ein_total = sum(speicher_ein[h].X for h in range(BETRIEBSSTUNDEN))
+    speicher_aus_total = sum(speicher_aus[h].X for h in range(BETRIEBSSTUNDEN))
     speicher_end = speicher_stand[9].X
 
     print("Loesung gefunden!")
@@ -479,7 +569,7 @@ def ergebnis_ausgeben():
     # Energiebilanz pro Stunde
     print("\nEnergiebilanz pro Stunde:")
     print(f"  {'Stunde':<12} {'PV':>8} {'Bedarf':>8} {'Netz':>8} {'Sp.Ein':>8} {'Sp.Aus':>8} {'Sp.Stand':>8}")
-    for h in range(10):
+    for h in range(BETRIEBSSTUNDEN):
         pv_h = PV_FLAECHE * strahlung_stunde[h] * umrechnung_pv * PV_WIRKUNGSGRAD
         slot_start_h = h * 12
         slot_ende_h = (h + 1) * 12
