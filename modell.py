@@ -42,7 +42,7 @@ SWAPBAT_ABSCHREIBUNGSKOSTEN = SWAPBAT_KOSTEN/SWAPBAT_LEBENSZYKLEN
 # Ladeeffizienz
 LADEEFFIZIENZ = 0.93  # 93% Effizienz
 
-STROMPREIS_KWH = 0.30  # €/kWh
+STROMPREIS_KWH = 0.2491  # €/kWh
 NETZ_MAX_KW = 2000 #kW
 
 #PV-Anlagen
@@ -70,6 +70,7 @@ PAX = 44
 
 DELAY_KOSTEN = 50    # EUR pro Minute Wartezeit
 ABSTELLENTGELT_STD = 15 
+# PAUSCHALE_ENERGIE = 800   # ändern?
 
 # Opportunitätskosten (Kosten, die nicht verdient werden bspw. durch Delay - entgangener Gewinn)
 
@@ -136,58 +137,27 @@ anzahl_flugzeuge = len(flugzeuge)
 
 def berechne_ladezeit_cc_cv(kapazitaet_kwh, spannung_v, strom_a, soc_start, soc_ende, soc_cc_ende, widerstand):
     """
-    Quelle: Kar et al. "CC-CV Charging of Lithium-ion Battery for Electric Vehicle Applications"
-    CC-Phase: Konstanter Strom von soc_start bis soc_cc_ende (80%)
-    Formel: t_CC = C_Ah * delta_SOC / I_CC
+    NEUE FORMEL: Empirisch mit Faktor 1.3
+    Quelle: Studie zu eVTOL Ladezeiten
+    t_c = E / P * 1.3 (Faktor 1.3 berücksichtigt CV-Phase)
 
-    CV-Phase: Konstante Spannung von soc_cc_ende bis soc_ende
-        Formel (Kar): I(t) = I_0 * e^(-t/RC)
-        Umgestellt: t_CV = -RC * ln(I_cutoff / I_0)
-
-    Parameter:
-        kapazitaet_kwh: Batteriekapazität in kWh
-        spannung_v: Nennspannung in V
-        strom_a: Ladestrom in A (I_0)
-        soc_start: Start-SOC (z.B. 0.10)
-        soc_ende: Ziel-SOC (z.B. 0.95)
-        soc_cc_ende: SOC am Ende der CC-Phase (z.B. 0.80)
-        widerstand: Innenwiderstand in Ohm (R)
+    Die alte RC-Formel ist für große Batteriepacks nicht geeignet,
+    da sie die elektrochemische Diffusion nicht berücksichtigt.
     """
-        # Umrechnung kWh -> Ah
-    kapazitaet_ah = kapazitaet_kwh * 1000 / spannung_v
+    # Zu ladende Energie
+    delta_soc = soc_ende - soc_start
+    energie_zu_laden = kapazitaet_kwh * delta_soc / LADEEFFIZIENZ  # kWh
 
-    # Umrechnung Ah -> Farad (für RC-Zeitkonstante)
-    kapazitaet_farad = kapazitaet_ah * 3600 / spannung_v
+    # Ladeleistung
+    leistung_kw = spannung_v * strom_a / 1000  # kW
 
-    # ===== CC-PHASE =====
-    # t_CC = C_Ah * delta_SOC / I_CC
-    if soc_start < soc_cc_ende:
-        delta_soc_cc = min(soc_cc_ende, soc_ende) - soc_start
-        t_cc_std = kapazitaet_ah * delta_soc_cc / strom_a
-    else:
-        t_cc_std = 0
+    # Gesamtzeit mit Faktor 1.3
+    FAKTOR_CV = 1.3
+    t_gesamt_std = energie_zu_laden / leistung_kw * FAKTOR_CV  # Stunden
 
-    # ===== CV-PHASE =====
-    # Formel: I(t) = I_0 * e^(-t/RC)
-    # Umgestellt: t_CV = -RC * ln(I_cutoff / I_0)
-    if soc_ende > soc_cc_ende:
-        # Cutoff-Strom (5% von I_0)
-        strom_cutoff = 0.05 * strom_a
-
-        # Zeitkonstante tau = R * C
-        tau = widerstand * kapazitaet_farad
-
-        # CV-Zeit bis Cutoff (100% SOC)
-        t_cv_voll_sec = -tau * math.log(strom_cutoff / strom_a)
-
-        # Anteilig für tatsächlichen SOC-Bereich (80% -> 95% statt 80% -> 100%)
-        anteil = (soc_ende - soc_cc_ende) / (1.0 - soc_cc_ende)
-        t_cv_std = (t_cv_voll_sec / 3600) * anteil
-    else:
-        t_cv_std = 0
-
-    # Gesamtzeit
-    t_gesamt_std = t_cc_std + t_cv_std
+    # CC-Phase ca. 77% der Gesamtzeit (1/1.3 = 0.77)
+    t_cc_std = t_gesamt_std / FAKTOR_CV
+    t_cv_std = t_gesamt_std - t_cc_std
 
     return {
         'cc_min': t_cc_std * 60,
@@ -196,10 +166,22 @@ def berechne_ladezeit_cc_cv(kapazitaet_kwh, spannung_v, strom_a, soc_start, soc_
     }
 
 # Ladezeiten berechnen
-ladezeit_ergebnis = berechne_ladezeit_cc_cv(
+# Plugin: Mit Multiport (3 Ports = 3x Strom)
+plugin_ergebnis = berechne_ladezeit_cc_cv(
     kapazitaet_kwh=BAT_KAPAZIT,
     spannung_v=PLUGIN_SPANNUNG_MAX,
-    strom_a=PLUGIN_STROM_MAX,
+    strom_a=PLUGIN_STROM_GESAMT,  # 400A * 3 = 1200A
+    soc_start=SOC_START,
+    soc_ende=SOC_ENDE,
+    soc_cc_ende=SOC_CC_ENDE,
+    widerstand=BAT_WIDERSTAND
+)
+
+# Swap: Eigene hohe Ladeleistung
+swap_ergebnis = berechne_ladezeit_cc_cv(
+    kapazitaet_kwh=BAT_KAPAZIT,
+    spannung_v=BAT_SPANNUNG_MAX,
+    strom_a=SWAP_STROM_MAX,  # 1000A
     soc_start=SOC_START,
     soc_ende=SOC_ENDE,
     soc_cc_ende=SOC_CC_ENDE,
@@ -208,13 +190,17 @@ ladezeit_ergebnis = berechne_ladezeit_cc_cv(
 
 
 # Ladezeiten
-plugin_ladezeit = ladezeit_ergebnis['gesamt_min']  # min
-swap_ladezeit = ladezeit_ergebnis['gesamt_min']    # gleiche Batterie, gleiche Ladezeit
+plugin_ladezeit_rein = plugin_ergebnis['gesamt_min']  # min (nur Laden)
+plugin_stecker_ein = 1   # min (Stecker einstecken)
+plugin_stecker_aus = 1   # min (Stecker rausnehmen)
+plugin_ladezeit = plugin_ladezeit_rein + plugin_stecker_ein + plugin_stecker_aus  # min (gesamt)
+
+swap_ladezeit = swap_ergebnis['gesamt_min']      # min
 swap_zeit = 10  # min (Wechselzeit)
 
 FLUGZEIT = FZG_REICHWEITE/FZG_GESCHW * 60   # min
-FLUGZEIT_GESAMT = FLUGZEIT * 2 + TURNAROUND_SWAP              # hin und zurück + turnaround am anderen Flughafen
-bat_blockzeit = (swap_ladezeit * 2) + FLUGZEIT + swap_zeit   # min
+FLUGZEIT_GESAMT = FLUGZEIT * 2 + swap_zeit * 2 + swap_ladezeit           # hin und zurück + 2x turnaround + ladung am Zielflughafen
+bat_blockzeit = swap_ladezeit + FLUGZEIT_GESAMT + (swap_zeit * 2)   # min
 
 
 
@@ -320,7 +306,7 @@ energie_zu_laden = BAT_KAPAZIT * delta_soc #kWh
 # Energie mit Verlusten
 energie_benoetigt = energie_zu_laden / LADEEFFIZIENZ  #--- oder einzeln für plugin/swap?
 
-# PV-Produktion (Sommerzeit)
+# PV-Produktion (Sommerzeit) - Nutzung für die Betriebsszenarien
 
 #pv_monat_pro_m2 = globalstrahlung_sommer * pv_wirkungsgrad  # kWh/m²/Monat
 #pv_tag_pro_m2 = pv_monat_pro_m2 / 31  # kWh/m²/Tag (31 Tage im Juli)
@@ -357,7 +343,12 @@ kosten_batterie = total_swap * BATTERIE_LEIHGEBUEHR
 
 # Delay-Kosten basierend auf Wartezeit pro Flugzeug
 kosten_delay = gp.quicksum(wartezeit[f] * SLOT_DAUER * DELAY_KOSTEN for f in range(anzahl_flugzeuge))
-kosten_airline = kosten_abstellen + kosten_batterie + kosten_delay #+ kosten_opportunitaet
+
+#Energiekosten (durch Airlines bezahlt) - unabhängig von der Stromquelle
+energieverbrauch_gesamt = (total_plugin + total_swap) * energie_benoetigt #kWh
+kosten_energie = energieverbrauch_gesamt * STROMPREIS_KWH
+
+kosten_airline = kosten_abstellen + kosten_batterie + kosten_delay + kosten_energie #+ kosten_opportunitaet
 
 
 # 5: Nebenbedingungen
@@ -462,7 +453,10 @@ for f in range(anzahl_flugzeuge):
     max_wartezeit_slots = MAX_WARTEZEIT_MIN // SLOT_DAUER  # 30 min / 5 min = 6 Slots
     model.addConstr(wartezeit[f] <= max_wartezeit_slots, name=f"Max_Wartezeit_{f}")
 
-#NB 5 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom + Speicher))
+    # NB 6e Wenn Swap genutzt wird, muss mindestens 1 Swap-Station existieren
+    model.addConstr(anzahl_swap >= ist_swap[f], name=f"Swap_Station_noetig_{f}")
+
+#NB 7 - Energiebilanz (Bedarf <= verfügbare Strom (PV-Strom + Netzstrom + Speicher))
 
 """ stündlich/slot/tag
 for t in range(anzahl_slots):
@@ -493,7 +487,7 @@ strom_pro_tag = gp.quicksum(stromnetz[h] for h in range(BETRIEBSSTUNDEN))
 opex_energie = strom_pro_tag * STROMPREIS_KWH #* 365 * planungsjahre
 
 # OPEX und Flughafen-Kosten
-opex = opex_energie + opex_wartung
+opex =  opex_wartung + opex_energie
 kosten_flughafen = capex + opex
 
 # ---- ZIELFUNKTION GESAMT -----
